@@ -3,33 +3,6 @@ This module is used to create synthetic data overlaying enviromental noises
 with drones noises.
 """
 
-
-#Need a mix of both with drones and without drones, those should be labeled
-#Need a wide range of drone noise types
-#Will be focusing on nature sounds overlayed with drone sounds
-#Need drone sounds of varying intensity
-#Need to add mix multiple tracks and also add periods of silence / very low waves
-#Need to make the tracks several minutes long to establish a moving baseline
-#Need to label which track is the normal vsa drone sound
-
-""" 
-*Each segment will be a "x" minute snippet of the entire recording, 
-the dtype will prob be a list of the WAV rawdata vals.
- - 15 sec segments , 15 min audios? 
-
-*Need to decide how long those snippets will be.
-
-*The drone segment needs to be an overlay of the 
-drone sound plus the segments drone_indx +-1.
-
-*Create multiple datasets with varying drone sound intensities to mimick proximity
-*Figure out how the sound mixing will occur with the drone
-"""
-
-
-
-
-#Params : Length of the new audio
 import logging
 import librosa
 import numpy as np
@@ -45,6 +18,15 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+"""
+Note there is a silent bug in PrepareData method if you choose to not overwrite 
+the json process will terminate but silently overwrite the .WAV audio file. This results
+in the meta data not matching the audio so the anomaly locations/intensities will no longer be known.
+
+Is not an issue when running once with no prior saved files!
+"""
+
 
 class DJ_splice:
     def __init__(self):
