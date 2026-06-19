@@ -13,23 +13,6 @@ with drones noises.
 #Need to label which track is the normal vsa drone sound
 
 """ 
-structure of dataframe
-
-{
-"filename" : str,
-"audio_len" : float,
-"audio_description" : str,
-"segment_1" : [List],
-"segment_2" : [List],
-:
-:
-:
-"segment_n" : [List],
-"drone_seg_indx: int
-}
-"""
-
-""" 
 *Each segment will be a "x" minute snippet of the entire recording, 
 the dtype will prob be a list of the WAV rawdata vals.
  - 15 sec segments , 15 min audios? 
@@ -53,7 +36,8 @@ import numpy as np
 import json
 from pathlib import Path
 import json
-
+import itertools
+import soundfile as sf
 
 
 logging.basicConfig(
@@ -92,8 +76,8 @@ class DJ_splice:
         # Check if files are for urban or nonUrban audios
         if Urban_nonUbran_bool == 0:
             logger.info("Files will be saved to the NonUrban Directory")
-            user_input = input("Type y to continue n to cancell")
             while True:
+                user_input = input("Type y to continue n to cancell")
                 if user_input.lower() == "n":
                     return 1 #error
                 elif user_input.lower() == "y":
@@ -102,8 +86,8 @@ class DJ_splice:
                     continue
         elif Urban_nonUbran_bool == 1:
             logger.info("Files will be saved to the Urban Directory")
-            user_input = input("Type y to continue n to cancell")
             while True:
+                user_input = input("Type y to continue n to cancell")
                 if user_input.lower() == "n":
                     return 1 #error
                 elif user_input.lower() == "y":
@@ -130,6 +114,7 @@ class DJ_splice:
             category = "Urban"
 
         #for every base audio file
+        progress_cntr = 0 #files processed
         for file_name in files_dict:
             audio_path = Path(f"./Data/Audio_Files/Raw_Audios/{self.raw_audio_subfolder}/{category}/{file_name}")
             #load audio
@@ -142,8 +127,7 @@ class DJ_splice:
             
             #make directory for base audio and its variation
             audio_dir_str = f"./Data/Audio_Files/Clips/{category}/{files_dict[file_name]}"
-            audio_dir_path = Path(audio_dir_str).mkdir(parents=True, exist_ok=True)
-            progress_cntr = 0 #files processed
+            audio_dir_path = Path(audio_dir_str).mkdir(parents=True, exist_ok=True)    
             for anomaly_type in anomaly_list: #Explosion, Gunshots, Animals, etc: Note these folders must exist prior
                 #Quick check if anomaly_type and path file is correct
                 anomaly_path = Path(f"./Data/Audio_Files/Raw_Audios/Anomalies/{anomaly_type}")
@@ -158,7 +142,8 @@ class DJ_splice:
 
                 #overlay base and anomaly audio randomly
                 data = self.Create_Audio_Data(base_y, anomaly_type, base_sr, overlayed_2_original_ratio, segment_duration)
-
+                new_amplitudes = list(itertools.chain.from_iterable(data[0])) 
+                
                 #save info in json
                 final_json = {}
                 final_json["base_audio_file_name"] = file_name 
@@ -167,8 +152,6 @@ class DJ_splice:
                 final_json["anomaly_info"] = data[1] #Will contain tuples (anomaly segment index, scaling factor of anomaly "loudness")
                 final_json["anomaly_type"] = anomaly_type
                 final_json["sample_rate"] = base_sr #same for anomaly and base audio
-                for index, seg_data in enumerate(data[0]):
-                    final_json[f"segment_{index}"] = {"amplitudes": seg_data.tolist()}
                 
                 json_file_name = f"{files_dict[file_name]}_{anomaly_type}_clips.json"
 
@@ -186,15 +169,25 @@ class DJ_splice:
                     else:
                         logger.warning(f"Overwriting existing file: {json_path}")
                         with open(json_path, 'w') as f:
-                            json.dump(final_json, f, indent=4) 
+                            json.dump(final_json, f, indent=4)
+
+                        #Saving new audio
+                        audio_file_name = f"{files_dict[file_name]}_{anomaly_type}_clips.wav"
+                        audio_file_path = Path(anomaly_dir_str+f"/{audio_file_name}")
+                        sf.write(audio_file_path, new_amplitudes, base_sr) 
                 else:
+                    #Saving new audio
+                    audio_file_name = f"{files_dict[file_name]}_{anomaly_type}_clips.wav"
+                    audio_file_path = Path(anomaly_dir_str+f"/{audio_file_name}")
+                    sf.write(audio_file_path, new_amplitudes, base_sr)
+                    #Save meta data
                     with open(json_path, 'w') as f:
                         json.dump(final_json, f, indent=4) 
             progress_cntr+=1
             logger.info(f"Base audio processed: {progress_cntr}/{total_files}")
 
         
-        logger.info(f"Process is complete\n{len(error_files)} files were not processed:")
+        logger.info(f"Process is complete\n{len(error_files)} files were skipped:")
         for bad_files in error_files:
             logger.info(f"{bad_files}") 
         
