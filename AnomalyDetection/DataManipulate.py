@@ -34,7 +34,7 @@ class DataChef():
         segment_duration: length of audio segements in secs
         window_size: number of values in a window to average when denoising, -> see _preprocess_audio method
         """
-        logger.info(f"Starting PCA data preparation | file: '{file_path}' | window_size: {window_size}")
+        logger.info(f"Starting data preparation | file: '{file_path}' | window_size: {window_size}")
         file_path = Path(file_path)
 
         if not file_path.exists():
