@@ -28,7 +28,50 @@ logger = logging.getLogger(__name__)
 class AnomalyDetection_methods():
     def __init__(self,):
         pass
-    
+
+    def PCA_pipeline(self, natural_bool: bool, anomaly_type: str, window_size: int) -> pd.DataFrame:
+        logger.info(f"Starting PCA Method pipeline | natural={natural_bool}, anomaly_type={anomaly_type}, window_size={window_size}")
+
+        chef = DataChef()
+        audio_dict = chef.GetAudios(natural_bool, anomaly_type)
+        logger.info(f"Loaded {len(audio_dict)} audio files")
+
+        # For averaged curves
+        mean_fpr    = np.linspace(0, 1, 100)
+        mean_recall = np.linspace(0, 1, 100)
+        roc_tprs, roc_aucs   = [], []
+        pr_precs,  pr_aucs   = [], []
+
+        counter = 0
+        for key, val in audio_dict.items():
+            df = chef.PrepData_Method(val, window_size)
+
+            target_var = 0.99 #target variance that we aim to obtain by n number of components
+            mean_reconstruction_error = self._PCA_method(target_var, df)
+            df["mean_reconstruction_error"] = mean_reconstruction_error
+
+            # --- ROC curve ---
+            fpr, tpr, _ = roc_curve(df["anomaly_bool"], df["mean_reconstruction_error"])
+            roc_tprs.append(np.interp(mean_fpr, fpr, tpr))
+            roc_aucs.append(auc(fpr, tpr))
+
+            # --- PR curve ---
+            prec, rec, _ = precision_recall_curve(df["anomaly_bool"], df["mean_reconstruction_error"])
+            # sklearn returns descending recall; flip so recall is ascending for interp
+            pr_precs.append(np.interp(mean_recall, rec[::-1], prec[::-1]))
+            pr_aucs.append(average_precision_score(df["anomaly_bool"], df["mean_reconstruction_error"]))
+
+            counter += 1
+            logger.debug(f"Progress: {counter}/{len(audio_dict)}")
+
+        # --- Plot ---
+        self._plot_mean_curves(
+            mean_fpr, roc_tprs, roc_aucs,
+            mean_recall, pr_precs, pr_aucs
+        )
+
+        logger.info("Pipeline complete.")
+
     #Main method to get evaluation results for Isolation Forest Method
     def IsolationForest_pipeline(self, natural_bool: bool, anomaly_type: str, window_size: int, test_ratio: float, contamination_param=0.01) -> pd.DataFrame:
         logger.info(f"Starting IsolationForest pipeline | natural={natural_bool}, anomaly_type={anomaly_type}, window_size={window_size}, test_ratio={test_ratio}, contamination={contamination_param}")
@@ -143,7 +186,7 @@ class AnomalyDetection_methods():
         ax.set(xlabel="Recall", ylabel="Precision", title="PR Curve")
         ax.legend(loc="upper right")
 
-        plt.suptitle("IsolationForest — Mean Curves Across Audio Files", fontsize=13)
+        plt.suptitle("Mean Curves Across Audio Files", fontsize=13)
         plt.tight_layout()
         plt.show()
         
@@ -197,11 +240,17 @@ class AnomalyDetection_methods():
 
         return train_scores, train_labels, test_scores, test_labels
     
-    def _PCA_method(self, target_var: float, X_train: np.ndarray,):
+    def _PCA_method(self, target_var: float, audio_df: pd.DataFrame,):
         """ 
         target_var: As a decimal, percentage variance you which to capture
         X_train: numpy vector of mfccs in frequency domain
         """
+        #mini function to get df ready for model input
+        def fix_df(df):
+            df = df.drop(columns= ["segment_index", "anomaly_bool"])
+            return df.to_numpy()
+
+        X_train = fix_df(audio_df)
 
         #Determine components needed to retain target_var variance
         pca = PCA(n_components= target_var)
@@ -213,10 +262,9 @@ class AnomalyDetection_methods():
         X_train_reconstructed = pca.inverse_transform(X_train_pca)
 
         # Calculate reconstruction error
-        self.reconstruction_error = (X_train - X_train_reconstructed).mean(axis=1)
-
-        self.X_errors = X_train - X_train_reconstructed
-        pass
+        reconstruction_error = (X_train - X_train_reconstructed).mean(axis=1)
+        
+        return reconstruction_error
 
 
 

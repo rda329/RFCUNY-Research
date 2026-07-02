@@ -250,7 +250,6 @@ class DataChef():
     
     
     
-    # ADD CROSS VALIDATION , Evaluate with cross-validation later for more robust evaluat
 
 
 if __name__ == "__main__":
