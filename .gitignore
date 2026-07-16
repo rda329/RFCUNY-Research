@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 /Data
 /AudioClassification/Data_v2
+/AnomalyDetection/Data

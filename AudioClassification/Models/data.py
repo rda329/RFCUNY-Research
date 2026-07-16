@@ -1,53 +1,6 @@
 #Notes
-""" 
-Notes:
-- Will be working with the data in the frequency domain. 
-Features:
-- MFCCs
-- spectral features 
-- Mel spectogram
-- Bark scale features
-- Loudness (A-Weighted) , percieved loudedness
-- Sharpness, roughness, fluctuation strength
-
-
-Practical Tips
-
-Always use log-mel as your baseline — it beats raw MFCCs on almost every ESC benchmark
-
-Data augmentation is critical: time stretching, pitch shifting, mixup, SpecAugment
-Pretrained models (PANNs trained on AudioSet) give huge boosts via transfer learning
-
-For real-time / edge applications, stick to handcrafted features (MFCCs + spectral) — they're fast and interpretable
-Consider ensemble of mel spectrogram CNN + handcrafted feature classifier for robustness
 """
-""" 
-
-Steps
-1. Get a json with the following structure with all raw audios
-
-{
-audio_file: [], "list of filepaths"
-audio_label: [], "animals, gunshots, explosion, human_voices, uav, unknown"
-}
-
-2. Evaluation will be done using batch cross validation
-
-3. Construct model input matrix
-- Each row will be uniform size, 10 sec clip
-- Features:
-    - Log-Mel
-    - Delta Mel
-
-Note:
-Delta Mel is computed directly from log mel spectogram
-So Why Do People Still Use Them?
-Because CNNs don't automatically learn temporal derivatives from a static 2D image — stacking deltas is an inductive bias shortcut:
-
-A conv kernel could learn to compute differences across the time axis on its own
-But explicitly providing deltas makes that gradient immediately available, speeding up learning and improving sample efficiency
-Particularly helpful when your dataset is small — the CNN doesn't have to discover temporal dynamics from scratch
-
+This file handles bootstrapping of audio data.
 """
 
 import random
