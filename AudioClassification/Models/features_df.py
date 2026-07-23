@@ -1,8 +1,7 @@
 """ 
 This file implement methods to build feature table for random forest, Xgboost models
-
-Do batch training to handle dimensionality
 """
+
 """
 Full feature extraction pipeline for audio event classification
 (gunshot / explosion / drone / other).
@@ -35,30 +34,188 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------- shared helper -----------------
-def load_toc(data_dir, split, class_to_idx=None):
+def load_toc(data_dir, split, class_to_idx=None, base_to_idx=None):
     """
     split: "train" or "test"
-    Reads data/{split}_toc.json with structure {"file_name": [...], "label": [...]}
-    and resolves each file_name to data/{split}/{file_name}.
-
-    class_to_idx is built from the train split and passed in for test,
-    so label indices stay consistent across both.
+    Reads data/{split}_toc.json.
+ 
+    Supports two TOC formats:
+      1. Original (single-label):
+         {"file_name": [...], "label": [...]}
+ 
+      2. Base + overlay (multi-label):
+         {"file_name": [...],
+          "base_audio": ["Airplanes", "Drones", ...],       # primary source, categorical
+          "overlay_Airplanes": [0,1,...], "overlay_Drones": [...], ...}  # 0/1 event flags
+         Any column whose values are all 0/1 is treated as an overlay class.
+         The one remaining non-binary, non-file_name column is treated as
+         the categorical base class.
+ 
+    class_to_idx : dict, optional
+        Mapping for overlay classes (e.g. built from train, passed in for test
+        so indices stay consistent across splits). Ignored for "single" format
+        TOCs (use class_to_idx there too, same param, same purpose).
+    base_to_idx : dict, optional
+        Mapping for the base_audio class (built from train, passed in for test).
+        Only used for the "base_overlay" format.
+ 
+    Returns
+    -------
+    files : list of str
+    labels : list
+        "single"       -> list of int class indices
+        "base_overlay" -> list of dicts: {"base": int or None, "overlays": {class: 0/1}}
+    class_to_idx : dict
+        "single"       -> label name -> index
+        "base_overlay" -> overlay class name -> index (empty dict if none found)
+    base_to_idx : dict
+        base class name -> index (empty dict unless "base_overlay" format with a base column)
+    label_format : str
+        "single" or "base_overlay"
     """
     toc_path = os.path.join(data_dir, f"{split}_toc.json")
     with open(toc_path, "r") as f:
         toc = json.load(f)
-
+ 
     file_names = toc["file_name"]
-    raw_labels = toc["label"]
-
-    if class_to_idx is None:
-        classes = sorted(set(raw_labels))
-        class_to_idx = {c: i for i, c in enumerate(classes)}
-
+    n = len(file_names)
+ 
+    if "label" in toc:
+        # ---- original single-label format ----
+        label_format = "single"
+        raw_labels = toc["label"]
+ 
+        if class_to_idx is None:
+            classes = sorted(set(raw_labels))
+            class_to_idx = {c: i for i, c in enumerate(classes)}
+ 
+        labels = [class_to_idx[l] for l in raw_labels]
+        base_to_idx = {}
+ 
+    else:
+        # ---- base + overlay format ----
+        label_format = "base_overlay"
+ 
+        def is_binary_column(values):
+            try:
+                return all(int(v) in (0, 1) for v in values)
+            except (ValueError, TypeError):
+                return False
+ 
+        other_cols = [k for k in toc.keys() if k != "file_name"]
+        overlay_cols = [c for c in other_cols if is_binary_column(toc[c])]
+        base_cols = [c for c in other_cols if c not in overlay_cols]
+ 
+        if len(base_cols) > 1:
+            logger.warning(
+                f"{split}_toc.json has multiple non-binary columns "
+                f"{base_cols}; only the first ({base_cols[0]}) will be used "
+                f"as the base class, rest are ignored."
+            )
+        base_col = base_cols[0] if base_cols else None
+ 
+        # ---- overlay classes ----
+        if class_to_idx is None:
+            overlay_names = [c.replace("overlay_", "", 1) for c in overlay_cols]
+            class_to_idx = {c: i for i, c in enumerate(sorted(overlay_names))}
+ 
+        overlay_col_by_class = {c: f"overlay_{c}" for c in class_to_idx}
+        missing = [
+            overlay_col_by_class[c] for c in class_to_idx
+            if overlay_col_by_class[c] not in toc
+        ]
+        if missing:
+            raise ValueError(
+                f"{split}_toc.json is missing overlay column(s) seen in "
+                f"train: {missing}"
+            )
+ 
+        # ---- base class ----
+        if base_col is not None:
+            raw_base = toc[base_col]
+            if base_to_idx is None:
+                base_classes = sorted(set(raw_base))
+                base_to_idx = {c: i for i, c in enumerate(base_classes)}
+            unseen = set(raw_base) - set(base_to_idx)
+            if unseen:
+                raise ValueError(
+                    f"{split}_toc.json base column '{base_col}' has class(es) "
+                    f"not seen in train: {unseen}"
+                )
+            base_indices = [base_to_idx[b] for b in raw_base]
+        else:
+            base_to_idx = {}
+            base_indices = [None] * n
+ 
+        labels = []
+        for i in range(n):
+            overlays = {
+                c: int(toc[overlay_col_by_class[c]][i]) for c in class_to_idx
+            }
+            labels.append({"base": base_indices[i], "overlays": overlays})
+ 
     files = [os.path.join(data_dir, split, fn) for fn in file_names]
-    labels = [class_to_idx[l] for l in raw_labels]
+    return files, labels, class_to_idx, base_to_idx, label_format
 
-    return files, labels, class_to_idx
+
+# ----------------- base -> overlay reconciliation -----------------
+def reconcile_base_overlay_labels(labels, base_to_idx, class_to_idx, strict=False):
+    """
+    For each "base_overlay"-format label dict, ensure the overlay entry
+    matching the row's own base class is set to 1.
+
+    The base audio's own class isn't necessarily reflected in the overlay
+    flags (those typically mark sounds mixed IN on top of the base), so a
+    clip whose base_audio is "Drones" should also have overlays["Drones"] == 1
+    even if no separate drone sound was overlaid.
+
+    Matching is done by class NAME: base_to_idx and class_to_idx are both
+    name -> index maps, so we look up the base class's name and set the
+    overlay of the same name, if one exists.
+
+    Parameters
+    ----------
+    labels : list of dict
+        As returned by load_toc for "base_overlay" format:
+        [{"base": int or None, "overlays": {class_name: 0/1, ...}}, ...]
+        Modified in place and also returned.
+    base_to_idx : dict[str, int]
+        Base class name -> index (from load_toc).
+    class_to_idx : dict[str, int]
+        Overlay class name -> index (from load_toc).
+    strict : bool
+        If True, raise an error when a base class has no matching overlay
+        class name (instead of just leaving that row's overlays unchanged).
+
+    Returns
+    -------
+    labels : list of dict (same list, mutated)
+    """
+    idx_to_base = {v: k for k, v in base_to_idx.items()}
+    overlay_class_names = set(class_to_idx.keys())
+
+    unmatched_base_classes = set(idx_to_base.values()) - overlay_class_names
+    if unmatched_base_classes:
+        msg = (
+            f"base class(es) with no matching overlay column by name: "
+            f"{unmatched_base_classes}. Rows with these base classes will be "
+            f"left unchanged."
+        )
+        if strict:
+            raise ValueError(msg)
+        else:
+            logger.warning(msg)
+
+    for label in labels:
+        base_idx = label.get("base")
+        if base_idx is None:
+            continue
+        base_name = idx_to_base.get(base_idx)
+        if base_name in label["overlays"]:
+            label["overlays"][base_name] = 1
+
+    return labels
+
 
 def summarize(feat_matrix, name):
     """Collapse a 1D (n_frames,) frame array into named
@@ -227,38 +384,149 @@ def extract_all_features(path, n_fft=2048, hop_length=512, sr=None, n_mfcc=13, n
     feats.update(extract_band_energy_features(S, sr, n_fft))
     return feats
 
+def add_tonality_and_bpf_features(df, n_fft=2048, hop_length=512, sr=None,
+                                   filepath_col="filepath"):
+    """
+    Given an existing feature DataFrame (must contain a filepath column),
+    load each audio file, compute low-band tonality/flatness and blade-pass
+    comb-strength features, and return a new DataFrame with those columns
+    merged in (aligned by row order / filepath).
+
+    Does NOT recompute any of the original features — only adds the new ones.
+    """
+    new_rows = []
+    n = len(df)
+
+    for i, path in enumerate(df[filepath_col]):
+        logger.info(f"Adding tonality/BPF features [{i + 1}/{n}]: {path}")
+        try:
+            y, sr_i = librosa.load(path, sr=sr, mono=True)
+            S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
+
+            feats = {}
+            feats.update(extract_tonality_features(S, sr_i, n_fft))
+            feats.update(extract_bpf_comb_features(S, sr_i, n_fft))
+            feats[filepath_col] = path
+            new_rows.append(feats)
+        except Exception as e:
+            logger.error(f"Failed to extract tonality/BPF features for {path}: {e}")
+            # keep row alignment even on failure, fill with NaN
+            new_rows.append({filepath_col: path})
+
+    new_feats_df = pd.DataFrame(new_rows)
+
+    # merge on filepath so row order/failures can't silently misalign columns
+    updated_df = df.merge(new_feats_df, on=filepath_col, how="left")
+    return updated_df
+
+
+def extract_tonality_features(S, sr, n_fft, low_hz=50, high_hz=500):
+    """Spectral flatness and peak-to-average ratio restricted to the
+    low-frequency band, to separate narrowband rotor/motor tones
+    (drones) from broadband engine/road noise (land vehicles)."""
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    band_mask = (freqs >= low_hz) & (freqs < high_hz)
+    band_power = (S[band_mask, :]) ** 2 + 1e-12
+
+    log_power = np.log(band_power)
+    geo_mean = np.exp(np.mean(log_power, axis=0))
+    arith_mean = np.mean(band_power, axis=0)
+    flatness = geo_mean / (arith_mean + 1e-12)
+
+    peak = np.max(band_power, axis=0)
+    par = peak / (arith_mean + 1e-12)
+
+    feats = {}
+    feats.update(summarize(flatness, "lowband_flatness"))
+    feats.update(summarize(par, "lowband_peak_avg_ratio"))
+    return feats
+
+
+def extract_bpf_comb_features(S, sr, n_fft, search_low=30, search_high=250):
+    """Autocorrelate the log-magnitude spectrum's low-frequency region
+    to detect evenly-spaced harmonic combs characteristic of rotor
+    blade-pass frequencies. High comb strength -> drone; vehicles
+    (broadband rumble) score low."""
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    mask = (freqs >= search_low) & (freqs <= search_high)
+    mean_spec = np.mean(S[mask, :], axis=1)
+    mean_spec = mean_spec - np.mean(mean_spec)
+
+    autocorr = np.correlate(mean_spec, mean_spec, mode="full")
+    autocorr = autocorr[len(autocorr) // 2:]
+    autocorr = autocorr / (autocorr[0] + 1e-10)
+
+    comb_strength = float(np.max(autocorr[3:])) if len(autocorr) > 3 else 0.0
+    comb_lag_idx = int(np.argmax(autocorr[3:]) + 3) if len(autocorr) > 3 else 0
+
+    return {
+        "bpf_comb_strength": comb_strength,
+        "bpf_comb_lag_bins": float(comb_lag_idx),
+    }
+
 
 # ----------------- DataFrame builder -----------------
 def build_feature_table(data_dir, split, n_fft=2048, hop_length=512, sr=None,
-                         n_mfcc=13, n_mels=128):
+                         n_mfcc=13, n_mels=128, class_to_idx=None, base_to_idx=None,
+                         reconcile_base_labels=True, strict_reconcile=False):
     """
     Build a pandas DataFrame of summary features, one row per audio file.
-
+ 
     Parameters
     ----------
     split: str "train" or "test"
-    audio_files : list of str
-        Paths to audio files.
-    labels : list, optional
-        Class label per file (same order/length as audio_files). If given,
-        a 'label' column is added.
     n_fft, hop_length : int
         STFT parameters shared across all spectral/band features.
     sr : int, optional
         Force a target sample rate; None keeps each file's native rate.
     n_mfcc, n_mels : int
         MFCC coefficient count and mel filterbank size.
-
+    class_to_idx : dict, optional
+        Label/overlay-class encoding. Pass the value returned from the train
+        call when building the test table, so encodings stay consistent
+        across splits.
+    base_to_idx : dict, optional
+        Base-class encoding (only relevant for the base+overlay TOC format).
+        Same idea: pass the train-split value in when building test.
+    reconcile_base_labels : bool
+        If True (default) and the TOC is "base_overlay" format, automatically
+        set overlays[base_class_name] = 1 for each row, so the base audio's
+        own class is reflected in the overlay flags even if it wasn't
+        explicitly marked as an overlay. Matching is by class name between
+        base_to_idx and class_to_idx.
+    strict_reconcile : bool
+        If True, raise an error when a base class name has no matching
+        overlay class (instead of just warning and leaving those rows as-is).
+ 
     Returns
     -------
-    pd.DataFrame
+    df : pd.DataFrame
+        - Original single-label TOCs: a 'label' column (int class index).
+        - Base+overlay TOCs: a 'label_base' column (int index of primary
+          source, or NaN if no base column existed) plus one
+          'label_overlay_<class>' column per overlay class (0/1).
+    class_to_idx : dict
+        The encoding used — reuse this for the paired split.
+    base_to_idx : dict
+        The base-class encoding used — reuse this for the paired split.
     """
-    audio_files, labels, class_2_indx = load_toc(data_dir, split)
-    logger.info(class_2_indx) #Label encoding map
+    audio_files, labels, class_to_idx, base_to_idx, label_format = load_toc(
+        data_dir, split, class_to_idx=class_to_idx, base_to_idx=base_to_idx
+    )
+    logger.info(f"Detected TOC label format: {label_format}")
+    if class_to_idx:
+        logger.info(f"Class encoding: {class_to_idx}")
+    if base_to_idx:
+        logger.info(f"Base class encoding: {base_to_idx}")
 
+    if label_format == "base_overlay" and reconcile_base_labels and base_to_idx:
+        labels = reconcile_base_overlay_labels(
+            labels, base_to_idx, class_to_idx, strict=strict_reconcile
+        )
+ 
     if labels is not None and len(labels) != len(audio_files):
         raise ValueError("labels must be the same length as audio_files")
-
+ 
     rows = []
     for i, path in enumerate(audio_files):
         logger.info(f"Extracting features [{i + 1}/{len(audio_files)}]: {path}")
@@ -266,18 +534,32 @@ def build_feature_table(data_dir, split, n_fft=2048, hop_length=512, sr=None,
             row = extract_all_features(path, n_fft=n_fft, hop_length=hop_length, sr=sr,
                                         n_mfcc=n_mfcc, n_mels=n_mels)
             row["filepath"] = path
-            if labels is not None:
+ 
+            if label_format == "single":
                 row["label"] = labels[i]
+            else:
+                row["label_base"] = labels[i]["base"]
+                for cls, val in labels[i]["overlays"].items():
+                    row[f"label_overlay_{cls}"] = val
+ 
             rows.append(row)
         except Exception as e:
             logger.error(f"Failed to extract features for {path}: {e}")
-
+ 
     df = pd.DataFrame(rows)
-
-    # keep filepath/label as leading columns if present
-    leading = [c for c in ("filepath", "label") if c in df.columns]
+ 
+    # keep filepath/label(s) as leading columns if present
+    label_cols = [
+        c for c in df.columns
+        if c == "label" or c == "label_base" or c.startswith("label_overlay_")
+    ]
+    leading = (["filepath"] if "filepath" in df.columns else []) + label_cols
     other = [c for c in df.columns if c not in leading]
-    return df[leading + other]
+    df = df[leading + other]
+
+    df = add_tonality_and_bpf_features(df)
+ 
+    return df, class_to_idx, base_to_idx
 
         
 

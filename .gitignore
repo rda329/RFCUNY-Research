@@ -182,3 +182,6 @@ cython_debug/
 /Data
 /AudioClassification/Data_v2
 /AnomalyDetection/Data
+/AudioClassification/Data_v3
+/Raw_Audios
+/AnomalyDetection/Data_v1

@@ -23,8 +23,117 @@ class AudioBootstrapper:
     def __init__(self):
         pass
 
+    def BootStrap_v2(self, og_folder_path: Path, sub_folder_names: list[str], output_folder_path: Path,
+                        aug_technique_num: int, num_bootstraps: int, toc_name: str, allow_self_overlay: bool = True):
+            """
+            Same as BootStrap, but overlay audio can be drawn from ANY class in
+            `sub_folder_names` instead of a single fixed overlay folder.
+    
+            og_folder_path: path to the original audio files (Train or Test parent dir)
+            output_folder_path: path to the save location (Bootstrap Folder Train or Test)
+            sub_folder_names: classes to bootstrap AND the pool of classes eligible for overlay
+                            (e.g. Explosion, Gunshots, UAV, shortened_unlabeled, etc)
+            aug_technique_num: number of audio augmentation techniques applied per file
+            num_bootstraps: number of bootstrap files created per class
+            allow_self_overlay: if False, a class will never be overlaid with audio from
+                                its own class (falls back to allowing it if no other
+                                classes have files available)
+    
+            toc additionally contains one binary column per class, "overlay_<class_name>",
+            indicating whether that class's audio was used as an overlay source for the
+            corresponding output file.
+            """
+            og_folder_path = Path(og_folder_path)
+            output_folder_path = Path(output_folder_path)
+            output_folder_path.mkdir(parents=True, exist_ok=True)
+    
+            if aug_technique_num > 5:
+                aug_technique_num = 5
+                logger.warning("Max techniques is 5. 'aug_technique_num' was set to 5")
+    
+            if aug_technique_num <= 0:
+                aug_technique_num = 1
+                logger.warning("Min technique is 1. 'aug_technique_num' was set to 1")
+    
+            # Pre-list files for every class once, reused both as bootstrap source and overlay pool
+            class_files = {
+                name: self._list_files_in_subdirs(og_folder_path, [name])
+                for name in sub_folder_names
+            }
+    
+            # Table of content to keep track of audio labels + which classes were overlaid in
+            toc = {
+                "file_name": [],
+                "base_audio": [],  # "Explosion", "UAV", "Gunshots", "unlabeled", etc
+            }
+            for name in sub_folder_names:
+                toc[f"overlay_{name}"] = []
+    
+            file_cntr = 0
+            total_files = num_bootstraps * len(sub_folder_names)
+    
+            for sub_folder in sub_folder_names:
+                all_files_og = class_files[sub_folder]
+                if not all_files_og:
+                    logger.warning(f"No files found for class '{sub_folder}', skipping.")
+                    continue
+    
+                og_file_deq = deque(all_files_og)
+                for i in range(num_bootstraps):
+                    if not og_file_deq:
+                        og_file_deq = deque(all_files_og)
+                    file_2_aug = og_file_deq[-1]
+                    y, sr = librosa.load(file_2_aug)
+    
+                    # Track which classes were used as overlay sources for this file
+                    overlay_used = {name: 0 for name in sub_folder_names}
+    
+                    # Applying audio augmentations
+                    for a in range(aug_technique_num):
+                        aug_tech_encoder = random.randint(1, 5)
+                        if aug_tech_encoder == 1:
+                            y = self._aug_time_stretch(y, sr)
+                        elif aug_tech_encoder == 2:
+                            y = self._aug_pitch_shift(y, sr)
+                        elif aug_tech_encoder == 3:
+                            y = self._aug_gaussian_noise(y)
+                        elif aug_tech_encoder == 4:
+                            y = self._aug_time_shift(y, sr)
+                        elif aug_tech_encoder == 5:
+                            overlay_classes = self._pick_overlay_classes(
+                                sub_folder_names, class_files, sub_folder, allow_self_overlay
+                            )
+                            if not overlay_classes:
+                                logger.warning("overlay_skipped_no_candidates_or_zero_chosen")
+                                continue
+                            # Ensure the base clip is at least 1 minute long before overlaying
+                            y = self._pad_to_min_duration(y, sr, min_duration_sec=60)
+                            for overlay_class in overlay_classes:
+                                y = self._aug_overlay(y, sr, class_files[overlay_class])
+                                overlay_used[overlay_class] = 1
+    
+                    og_file_deq.pop()  # eliminating file from choices
+    
+                    # save new audio
+                    file_cntr += 1
+                    logger.info(f"Files processed: {file_cntr}/{total_files}")
+                    full_out_path = output_folder_path / f"audio_{file_cntr}.wav"
+                    sf.write(full_out_path, y, sr)
+    
+                    toc["file_name"].append(f"audio_{file_cntr}.wav")
+                    toc["base_audio"].append(sub_folder)
+                    for name in sub_folder_names:
+                        toc[f"overlay_{name}"].append(overlay_used[name])
+    
+            # Save table of contents as JSON in the parent of the output folder
+            toc_path = output_folder_path.parent / f"{toc_name}.json"
+            with open(toc_path, "w") as f:
+                json.dump(toc, f, indent=2)
+    
+            return toc
+
     def BootStrap(self, og_folder_path: Path, sub_folder_names: list[str], output_folder_path: Path,
-                  overlay_folder_name: str, aug_technique_num: int, num_bootstraps: int):
+                  overlay_folder_name: str, aug_technique_num: int, num_bootstraps: int, toc_name: str):
         """
         og_folder_path: path to the original audio files (Train or Test parent directories in Raw_Audios folder for Data_v2)
         output_folder_path: path to the save location (Bootstrap Folder Train or Test)
@@ -46,9 +155,9 @@ class AudioBootstrapper:
         # File paths that can be used to overlay with original audio
         all_files_overlay = self._list_files_in_subdirs(og_folder_path, [overlay_folder_name])
 
-        if aug_technique_num > 5:
-            aug_technique_num = 5
-            logger.warning("Max techniques is 5. 'aug_technique_num' was set to 5")
+        if aug_technique_num > 4:
+            aug_technique_num = 4
+            logger.warning("Max techniques is 4. 'aug_technique_num' was set to 4")
 
         if aug_technique_num <= 0:
             aug_technique_num = 1
@@ -78,7 +187,8 @@ class AudioBootstrapper:
                     elif aug_tech_encoder == 4:
                         y = self._aug_time_shift(y, sr)
                     elif aug_tech_encoder == 5:
-                        y = self._aug_overlay(y, sr, all_files_overlay)
+                        continue #NO OVERLAY
+                        # y = self._aug_overlay(y, sr, all_files_overlay)
 
                 og_file_deq.pop()  # eliminating file from choices
 
@@ -92,13 +202,54 @@ class AudioBootstrapper:
                 toc["label"].append(sub_folder)
 
         # Save table of contents as JSON in the parent of the output folder
-        toc_path = output_folder_path.parent / "toc.json"
+        toc_path = output_folder_path.parent / f"{toc_name}.json"
         with open(toc_path, "w") as f:
             json.dump(toc, f, indent=2)
 
         return toc
 
     # --------------- Helper Functions ------------------------
+    def _pad_to_min_duration(self, y: np.ndarray, sr: int, min_duration_sec: float = 60) -> np.ndarray:
+        """
+        Zero-pads (silence) the end of `y` so its duration is at least
+        `min_duration_sec` seconds. If `y` is already long enough, it is
+        returned unchanged.
+        """
+        min_samples = int(sr * min_duration_sec)
+        if len(y) >= min_samples:
+            return y
+        pad_amount = min_samples - len(y)
+        return np.pad(y, (0, pad_amount), mode="constant")
+ 
+    def _pick_overlay_classes(self, sub_folder_names: list[str], class_files: dict, base_class: str,
+                               allow_self_overlay: bool) -> list[str]:
+        """
+        Pick a uniformly random NUMBER of overlay classes (0 to the max number of
+        eligible classes), then sample that many distinct classes without replacement
+        to draw overlay clips from. Restricted to classes that actually have files
+        available. Optionally excludes the base class itself.
+ 
+        Returns an empty list if 0 overlays were rolled, or if no candidates exist.
+        """
+        candidates = [name for name in sub_folder_names if class_files.get(name)]
+ 
+        if not allow_self_overlay:
+            non_self_candidates = [name for name in candidates if name != base_class]
+            if non_self_candidates:
+                candidates = non_self_candidates
+            # else: fall back to allowing self-overlay since nothing else is available
+ 
+        if not candidates:
+            return []
+ 
+        max_overlays = len(candidates)
+        num_overlays = random.randint(0, max_overlays)  # uniform over [0, max_overlays]
+ 
+        if num_overlays == 0:
+            return []
+ 
+        return random.sample(candidates, num_overlays)
+
     def _list_files_in_subdirs(self, parent_dir: str | Path, subdir_names: list[str]) -> list[Path]:
         """
         Given a parent directory and a list of subdirectory names,
