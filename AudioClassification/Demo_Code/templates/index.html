@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Classifier Demo</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="app-header">
+    <div class="title-block">
+      <h1>Audio Classifier Demo</h1>
+      <p class="subtitle">Runs the multi-label and single-label XGBoost models together on one clip.</p>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <!-- LEFT: inputs -->
+    <section class="card inputs">
+      <h2 class="card-title">Inputs</h2>
+
+      <div class="field">
+        <label for="multiModelDir">Multi-label model directory</label>
+        <input type="text" id="multiModelDir" placeholder="./Model/xgboost_multi_label" autocomplete="off">
+      </div>
+
+      <div class="field">
+        <label for="singleModelDir">Single-label model directory</label>
+        <input type="text" id="singleModelDir" placeholder="./Model/xgboost_singlelabel" autocomplete="off">
+      </div>
+
+      <div class="field">
+        <label for="audioPath">Audio file path</label>
+        <input type="text" id="audioPath" placeholder=".\Data_v3\Raw_Audios\Test\Helicopter\example.wav" autocomplete="off">
+      </div>
+
+      <button type="button" class="analyze-btn" id="analyzeBtn">Analyze audio</button>
+
+      <div class="hint" id="hint">Provide at least one model directory and an audio path, then analyze.</div>
+    </section>
+
+    <!-- RIGHT: results -->
+    <section class="results-col">
+
+      <div class="card player-card">
+        <div class="waveform-wrap">
+          <canvas id="scope" width="900" height="120"></canvas>
+          <div class="scope-overlay" id="scopeOverlay">No audio loaded</div>
+        </div>
+        <div class="transport" id="transport" hidden>
+          <button type="button" id="playBtn" class="play-btn" aria-label="Play">▶</button>
+          <span class="time-current" id="timeCurrent">0:00</span>
+          <input type="range" id="seekBar" class="seek-bar" min="0" max="100" value="0" step="0.01">
+          <span class="time-duration" id="timeDuration">0:00</span>
+        </div>
+        <div class="track-name" id="trackName"></div>
+        <audio id="player"></audio>
+      </div>
+
+      <div class="results-grid">
+
+        <div class="card result-card accent-multi" id="multiCard">
+          <h2 class="card-title">Multi-label predictions</h2>
+          <div class="result-body" id="multiBody">
+            <div class="empty-state">No results yet.</div>
+          </div>
+        </div>
+
+        <div class="card result-card accent-single" id="singleCard">
+          <h2 class="card-title">Single-label prediction</h2>
+          <div class="result-body" id="singleBody">
+            <div class="empty-state">No results yet.</div>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+</div>
+
+<script>
+const multiModelDirInput = document.getElementById('multiModelDir');
+const singleModelDirInput = document.getElementById('singleModelDir');
+const audioPathInput = document.getElementById('audioPath');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const hint = document.getElementById('hint');
+const scopeOverlay = document.getElementById('scopeOverlay');
+const transport = document.getElementById('transport');
+const trackName = document.getElementById('trackName');
+const player = document.getElementById('player');
+const playBtn = document.getElementById('playBtn');
+const canvas = document.getElementById('scope');
+const ctx = canvas.getContext('2d');
+const multiBody = document.getElementById('multiBody');
+const singleBody = document.getElementById('singleBody');
+const seekBar = document.getElementById('seekBar');
+const timeCurrent = document.getElementById('timeCurrent');
+const timeDuration = document.getElementById('timeDuration');
+
+function formatTime(sec) {
+  if (!isFinite(sec) || sec < 0) return '0:00';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+player.addEventListener('loadedmetadata', () => {
+  seekBar.max = player.duration || 0;
+  seekBar.value = 0;
+  timeDuration.textContent = formatTime(player.duration);
+  timeCurrent.textContent = '0:00';
+});
+
+player.addEventListener('timeupdate', () => {
+  if (!seekBar.matches(':active')) {
+    seekBar.value = player.currentTime;
+  }
+  timeCurrent.textContent = formatTime(player.currentTime);
+});
+
+seekBar.addEventListener('input', () => {
+  player.currentTime = seekBar.value;
+  timeCurrent.textContent = formatTime(player.currentTime);
+});
+
+function drawIdleGrid() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#e4e4e2';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, canvas.height / 2);
+  ctx.lineTo(canvas.width, canvas.height / 2);
+  ctx.stroke();
+}
+drawIdleGrid();
+
+async function drawWaveformFromUrl(url) {
+  try {
+    const resp = await fetch(url);
+    const buf = await resp.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const actx = new AudioCtx();
+    const audioBuffer = await actx.decodeAudioData(buf.slice(0));
+    const raw = audioBuffer.getChannelData(0);
+    const samples = canvas.width;
+    const blockSize = Math.floor(raw.length / samples) || 1;
+    const peaks = [];
+    for (let i = 0; i < samples; i++) {
+      let min = 1.0, max = -1.0;
+      for (let j = 0; j < blockSize; j++) {
+        const v = raw[i * blockSize + j] || 0;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      peaks.push([min, max]);
+    }
+    drawIdleGrid();
+    ctx.strokeStyle = '#5b6472';
+    ctx.lineWidth = 1.4;
+    const mid = canvas.height / 2;
+    peaks.forEach(([min, max], i) => {
+      ctx.beginPath();
+      ctx.moveTo(i, mid + min * (mid - 8));
+      ctx.lineTo(i, mid + max * (mid - 8));
+      ctx.stroke();
+    });
+    actx.close();
+  } catch (err) {
+    console.warn('waveform render skipped', err);
+  }
+}
+
+playBtn.addEventListener('click', () => {
+  if (player.paused) { player.play(); } else { player.pause(); }
+});
+player.addEventListener('play', () => playBtn.textContent = '❚❚');
+player.addEventListener('pause', () => playBtn.textContent = '▶');
+player.addEventListener('ended', () => playBtn.textContent = '▶');
+
+function renderPredictionList(container, data) {
+  container.innerHTML = '';
+
+  if (data.error) {
+    const err = document.createElement('div');
+    err.className = 'error-state';
+    err.textContent = data.error;
+    container.appendChild(err);
+    return;
+  }
+
+  if (data.mode === 'single' && data.predicted_class) {
+    const banner = document.createElement('div');
+    banner.className = 'top-call';
+    banner.innerHTML = `<span class="top-call-label">Predicted label</span><span class="top-call-value">${data.predicted_class}</span>`;
+    container.appendChild(banner);
+  }
+
+  data.predictions.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'result-row' + (p.present ? ' present' : '');
+    const pct = Math.round(p.prob * 100);
+    row.innerHTML = `
+      <span class="flag">${p.present ? '✓' : '—'}</span>
+      <span class="label-name">${p.name}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <span class="prob-val">${p.prob.toFixed(3)}</span>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function renderEmpty(container, text) {
+  container.innerHTML = `<div class="empty-state">${text}</div>`;
+}
+
+analyzeBtn.addEventListener('click', async () => {
+  const multiDir = multiModelDirInput.value.trim();
+  const singleDir = singleModelDirInput.value.trim();
+  const audioPath = audioPathInput.value.trim();
+
+  if (!audioPath) {
+    hint.textContent = 'Audio file path is required.';
+    hint.classList.add('hint-error');
+    return;
+  }
+  if (!multiDir && !singleDir) {
+    hint.textContent = 'Provide at least one model directory.';
+    hint.classList.add('hint-error');
+    return;
+  }
+
+  hint.classList.remove('hint-error');
+  hint.textContent = 'Running inference…';
+  analyzeBtn.disabled = true;
+  scopeOverlay.style.display = 'none';
+
+  try {
+    const resp = await fetch('/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        multi_model_dir: multiDir,
+        single_model_dir: singleDir,
+        audio_path: audioPath
+      })
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      hint.textContent = data.error || 'Request failed.';
+      hint.classList.add('hint-error');
+      drawIdleGrid();
+      scopeOverlay.textContent = 'Error';
+      scopeOverlay.style.display = 'flex';
+      return;
+    }
+
+    hint.textContent = `Loaded ${data.audio_name}.`;
+
+    trackName.textContent = data.audio_name;
+    player.src = data.audio_url;
+    transport.hidden = false;
+    playBtn.textContent = '▶';
+    drawWaveformFromUrl(data.audio_url);
+
+    if (data.multi) {
+      renderPredictionList(multiBody, data.multi);
+    } else {
+      renderEmpty(multiBody, 'No multi-label model directory provided.');
+    }
+
+    if (data.single) {
+      renderPredictionList(singleBody, data.single);
+    } else {
+      renderEmpty(singleBody, 'No single-label model directory provided.');
+    }
+
+  } catch (err) {
+    hint.textContent = 'Request failed: ' + err.message;
+    hint.classList.add('hint-error');
+    drawIdleGrid();
+    scopeOverlay.textContent = 'Error';
+    scopeOverlay.style.display = 'flex';
+  } finally {
+    analyzeBtn.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>
