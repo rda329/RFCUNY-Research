@@ -1,0 +1,20 @@
+path to model
+.\AudioClassification\Model\xgboost_multi_label
+
+.\AudioClassification\Model\xgboost_multi_label
+
+
+
+Audios
+
+.\Demo_Audios\840492__qubodup__war-zone-lo-fi.ogg
+
+.\Demo_Audios\842369__klankbeeld__high-apache-ah-64-attack-helicopters-sanctuary-rijskampen-s-hertogenbosch-netherlands-1057-am-260116_0068.wav
+
+
+.\Demo_Audios\854464__qubodup__fpv-drone-flight-1.wav
+
+.\Demo_Audios\audio_264.wav
+
+.\Demo_Audios\audio_14.wav
+
